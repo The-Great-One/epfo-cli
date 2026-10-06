@@ -1,10 +1,11 @@
 # Scoping: the Unified Portal (`unifiedportal-mem.epfindia.gov.in`)
 
-**Status: logged in end-to-end, and the account turns out to be parked behind a
-forced password change.** A real browser drove the whole login (credentials → OTP →
-past the door). What it found: the OTP step **cannot** be completed by a
-hand-rolled POST, and the account cannot reach the dashboard until its password is
-changed via an **Aadhaar OTP**. Full detail in "Verified live" below.
+**Status: the whole login + forced password change was completed end-to-end in a
+real browser.** credentials → OTP → change-password (Aadhaar OTP) → *"Password has
+been changed successfully."* What it taught: the OTP step **cannot** be completed by
+a hand-rolled POST, the change-password step is driven by a JS `confirm()` that a
+browser driver silently swallows unless dialogs are accepted, and the Aadhaar OTP is
+mandatory (there is no old/new-only path). Full detail in "Verified live" below.
 
 Recorded 2026-10-06, on the live site.
 
@@ -214,19 +215,45 @@ this step at all.
   Real Chrome (`channel="chrome"`) passes; a plain `urllib` fetch with a normal
   User-Agent also passes. It is the headless fingerprint, not the IP.
 
-### The forced password change needs an Aadhaar OTP
+### The forced password change needs an Aadhaar OTP — and it was completed
 
-The change-password page offers a normal form (old / new / confirm) *and* an
-Aadhaar path ("मैं पासवर्ड रीसेट … आधार आधारित प्रमाणीकरण", "Get AADHAAR OTP"). The
-new-password rules are strict:
+The change-password page shows Old / New / Confirm, a consent checkbox, and a single
+action button **Get AADHAAR OTP** — there is **no old/new-only submit**. The sequence
+is:
+
+```text
+fill old / new / confirm
+tick the Aadhaar consent checkbox (#consentStatus)
+click  Get AADHAAR OTP        → JS confirm("Are you sure to change password ?")
+                              → POST → page swaps to an #aadhaarOtp field
+                              → also fires a real OTP to the Aadhaar-linked mobile
+enter the Aadhaar OTP, click  Change Password (#updatePassBtn)
+                              → JS confirm(...) again
+                              → "Password has been changed successfully."
+```
+
+**The trap that costs an attempt:** both buttons go through a native
+`window.confirm("Are you sure to change password ? ")`. Playwright's default is to
+**dismiss** dialogs, so the submit is swallowed and the page just sits there looking
+untouched. Register `page.on("dialog", lambda d: d.accept())` or the change never
+fires. (This is why three earlier clicks did nothing.)
+
+The new-password rules, read off the page's own `#regex` value:
 
 ```text
 regex = (?=^.{8,20}$)(?=(.*\d){2,})(?=(.*[A-Za-z]){4,})(?=.*[A-Z])(?=.*[a-z])(?=.*[!@#$%^&*?])(?!.*\s)
         → 8–20 chars, ≥2 digits, ≥1 upper, ≥1 lower, ≥1 symbol from !@#$%^&*?
 ```
 
-Changing the password is a real credential change on a UAN, so it was **not** done;
-that decision belongs to the account holder.
+**Done on 2026-10-06** with the account holder present (Aadhaar OTP in hand). The
+portal itself says login now works with the new password:
+
+> *"Password has been changed successfully. Kindly login with the new password."*
+
+**Knock-on effect:** the **same UAN password is shared with the passbook portal**,
+so `epfo-cli`'s keychain entry had to be updated on the same day. Any future
+password change on this portal will silently break `epfo-cli` until the keychain is
+refreshed — check `epfo-cli passbook` after any password change here.
 
 ## What this means for the product
 
@@ -240,7 +267,9 @@ that decision belongs to the account holder.
 
 ## Next step
 
-1. Account holder changes the EPFO password (Aadhaar OTP; rules above). One-time.
-2. Then a browser-driven login, and dump the real dashboard/nav to see which of
-   claims / transfers / KYC is actually reachable for this UAN.
-3. Only then decide whether a claim-preparation client is worth building.
+1. ~~Change the EPFO password~~ **Done 2026-10-06.**
+2. **Now do a browser-driven login with the new password** and dump the real
+   dashboard/nav, to see which of claims / transfers / KYC is actually reachable for
+   this UAN. The forced-reset page should no longer appear (firstLogin is cleared).
+3. Only then decide whether a claim-preparation client is worth building — and it
+   will be browser-driven (Playwright), not a headless HTTP client.
