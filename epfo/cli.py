@@ -669,9 +669,10 @@ def cmd_export(args: argparse.Namespace) -> int:
     This replaces an older implementation that called ``session.get`` on a path
     and tried to parse a contributions table from the raw HTML. That was dead
     on arrival twice over: it needed a saved session (which the portal rejects),
-    and ``parse_passbook`` has never seen a real page because the ledger
-    endpoint is unidentified (see README). Exporting the balances the portal
-    actually serves is the honest version of this command.
+    and it parsed the *summary* page with ``parse_passbook``, which has never
+    seen a real page. The month-by-month ledger lives in ``ledger``
+    (``parse_yearly_passbook``); this command reports the balances the home page
+    actually serves.
     """
     profile = load_profile()
     resolved = _resolve_credentials(args, profile)
