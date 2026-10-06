@@ -402,10 +402,10 @@ credentials and reads pages the portal serves you; it changes nothing, and it
 does not touch the Unified Portal (the separate site that handles claims,
 transfers and KYC edits).
 
-No account data is checked in. Every UAN, member id, balance and name in the
-repository is a placeholder or synthesised; the live figures in this README are
-the account owner's own and are published with their consent. The password is
-never written to a file anywhere — it lives in the OS keychain, and the code has
+No account data is checked in. Every UAN, member id, employer name, balance and
+salary in the tests, the fixtures and this README is a placeholder or a
+synthesised value — the structure is real, the numbers are not. The password is
+never written to a file anywhere: it lives in the OS keychain, and the code has
 no path that serialises it.
 
 Before using this, read the portal's terms: automating a login may be restricted
