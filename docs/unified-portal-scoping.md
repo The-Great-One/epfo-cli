@@ -1,8 +1,9 @@
 # Scoping: the Unified Portal (`unifiedportal-mem.epfindia.gov.in`)
 
-Reconnaissance only — **no credentialed login was attempted**, so everything below
-is from public page/script fetches. The post-login flow (and whether claims demand an
-OTP) is deliberately unverified.
+**Status: scoped, and the deciding question answered — the login is OTP-gated.**
+One scripted login was run with the real credentials; it succeeded and revealed the
+gate (see "Verified" below). Nothing past the OTP door was examined, and no OTP was
+requested or entered.
 
 Recorded 2026-10-06, on the live site.
 
@@ -105,6 +106,45 @@ digits comma-separated, `6,7,5,8,9,9,…`).
 WebCrypto-AES-GCM bundle, so the algorithm is fully specified in shipped code — no
 guesswork.
 
+## Verified: the login works, and it is OTP-gated
+
+A scripted login was run once, with the real credentials. It **succeeds** — and the
+result answers the question that decided this project.
+
+```text
+POST /memberinterface/            → 303 See Other
+Location: /memberinterface/ekyc/otpLogin?_HDIV_STATE_=18-0-E37AFF…
+```
+
+On a correct `hidUserName` + `hidPassword` the portal does **not** land on a
+dashboard. It redirects to an **eKYC OTP** step. So for this account **a logged-in
+session is not reachable without an OTP** — the gate is at the *door*, not at the
+claim form.
+
+An earlier attempt, with the form fields as first guessed, answered
+`302 → /error.jsp` instead. That is a useful pair of outcomes: the portal tells
+"wrong credentials" (error.jsp) apart from "correct credentials, now prove OTP"
+(ekyc/otpLogin), which is exactly how the two halves were told apart here.
+
+**Consequence for the product idea**: a CLI cannot raise a claim unattended. Any
+write against this portal needs a human OTP first, so the honest ceiling is a tool
+that *prepares* a claim and stops for the OTP — and since the OTP is demanded before
+you even see the dashboard, it may be that the browser is simply the right tool.
+
+### Three details that would waste a session if rediscovered
+
+- **`lblChallange` is not the submitted `challenge`.** The label holds plain digits
+  (`-338163059477565763`); the hidden `challenge` input holds the *same* value
+  **comma-separated** (`-,3,3,8,1,6,3,0,…`). The hash uses the label; the form
+  submits the comma-separated field. Using the wrong one answered `error.jsp` while
+  looking perfectly correct.
+- **The visible `userName` is submitted empty**, not filled. The page sets it to
+  `"r" × len`, then an async callback overwrites it with `""` while `hidUserName`
+  carries the AES value. Only `password` keeps its `"r" × len` decoy.
+- **The `Location` is plain `http://`,** which a naive follower hangs on forever —
+  the same trap as the passbook portal. Do not follow it; read the header and force
+  `https://`.
+
 ## Reproducibility
 
 Everything needed is standard-library Python plus one AES implementation:
@@ -121,20 +161,18 @@ submission, and whether it enforces one-session-per-user.
 
 ## Unknowns, and the one that decides the project
 
-1. **Does a claim submission require an OTP?** This is the gate. Login has no
-   captcha, but a claim is a *write* against a retirement account and is very likely
-   to require OTP/Aadhaar verification. If it does, the honest answer may be that a
-   CLI can *prepare* a claim but a human must complete the OTP step — which is still
-   useful (form-filling and pre-validation), but a different product from
-   "raise a claim from the CLI".
-2. **What the post-login token/session model is** — whether it shares the passbook
-   portal's hostile one-shot tokens or is a normal session.
+1. ~~Does a claim submission require an OTP?~~ **Answered: yes, and earlier than
+   expected** — the OTP is demanded at login (`/ekyc/otpLogin`), before any
+   dashboard. See above.
+2. **What the session is worth once the OTP is cleared** — unknown, because the OTP
+   step was never completed. Everything past the door is still unexamined.
 3. **Whether the concurrency guard blocks automation** (`isConcurrent`, the
-   `concurrentSession()` handler).
+   `concurrentSession()` handler). It was submitted as the page's own `false` and
+   did not appear to interfere.
 
-These need a **credentialed login**, which I have not done: it would send an OTP to
-the account holder's phone and risks the account's session state. That step is the
-account holder's call, not something to run unattended.
+The login step is now done. **The OTP itself was never requested or entered** — the
+redirect was read, the OTP page was never rendered, and no code was sent to the
+account holder's phone. What remains needs the account holder present.
 
 ## Recommended next step
 
