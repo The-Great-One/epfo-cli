@@ -858,6 +858,103 @@ def _emit(args: argparse.Namespace, payload, what: str) -> bool:
     return False
 
 
+def cmd_unified(args: argparse.Namespace) -> int:
+    """Read the Unified Portal's claim surface through a real browser.
+
+    The passbook host can be driven headlessly; this one cannot (see
+    ``unified.py``). So this command attaches to a Chrome the operator already
+    started with ``--remote-debugging-port``, signs in, stops for the mandatory
+    OTP, then walks the claim-relevant pages by clicking the portal's own nav.
+    """
+    from .unified import CLAIM_PAGES, UnifiedError, UnifiedSession
+
+    endpoint = args.endpoint or "127.0.0.1:9222"
+    try:
+        with UnifiedSession(endpoint) as session:
+            session.open_login()
+            state = session.state()
+            print(f"browser page: {state['title']!r}  {state['url']}")
+
+            if state.get("hasLogin"):
+                resolved = _resolve_credentials(args, load_profile())
+                if resolved is None:
+                    return 2
+                uan, password = resolved
+                print("signing in ...")
+                session.dismiss_alert()
+                session.submit_credentials(uan, password)
+                state = session.state()
+
+            if state.get("hasOtp"):
+                otp_id = session.otp_id()
+                where = "the Aadhaar-linked mobile"
+                print(f"OTP sent to {where}" +
+                      (f" (OTP-ID {otp_id})" if otp_id else ""))
+                otp = _read_otp()
+                if otp is None:
+                    return 3
+                session.submit_otp(otp)
+                state = session.state()
+
+            if not state.get("hasClaimLink"):
+                print("error: not signed in. The Unified Portal authenticates only "
+                      "a real browser session (a plain HTTP client gets "
+                      "error.jsp), and the OTP is mandatory. Start Chrome with "
+                      "--remote-debugging-port=9222 and retry.", file=sys.stderr)
+                return 1
+
+            report: dict = {"pages": {}}
+            session.go_home()
+            for name, fragment in CLAIM_PAGES:
+                page = session.click_and_read(fragment)
+                report["pages"][name] = page
+                if page.get("absent"):
+                    print(f"  {name:16} (link not present on the page)")
+                else:
+                    print(f"  {name:16} {page['title'][:42]:44} {page['url'][:52]}")
+                    note = _claim_blocker(name, page.get("text", ""))
+                    if note:
+                        print(f"  {'':16} -> {note}")
+                session.go_home()
+    except UnifiedError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"\nfull page text written to {Path(args.out).resolve()}")
+    return 0
+
+
+def _read_otp() -> str | None:
+    """One 6-digit OTP from the terminal (or from stdin when piped)."""
+    try:
+        if sys.stdin.isatty():
+            otp = getpass("OTP (6 digits): ")
+        else:
+            otp = sys.stdin.readline()
+    except EOFError:
+        otp = ""
+    otp = (otp or "").strip()
+    if not (otp.isdigit() and len(otp) == 6):
+        print("error: an OTP of exactly 6 digits is required.", file=sys.stderr)
+        return None
+    return otp
+
+
+def _claim_blocker(page: str, text: str) -> str | None:
+    """The one-line reason a claim page cannot proceed, if it states one."""
+    if page != "claim":
+        return None
+    flat = " ".join(text.split())
+    if "INVALIDIFSC" in flat or "VALID IFSC" in flat.upper():
+        return ("blocked: KYC has no valid bank account + IFSC "
+                "(Manage >> KYC). The claim form will not render until it does.")
+    if "Claim Record Not Found" in flat:
+        return "no claim on record."
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="epfo-cli",
@@ -941,6 +1038,16 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor",
                             help="check connectivity and optional dependencies")
     doctor.set_defaults(func=cmd_doctor)
+
+    unified = sub.add_parser(
+        "unified",
+        help="read the Unified Portal claim surface via a real browser (OTP needed)")
+    unified.add_argument("--uan")
+    _add_credential_flags(unified)
+    unified.add_argument("--endpoint", default="127.0.0.1:9222",
+                         help="CDP endpoint of the Chrome you started")
+    unified.add_argument("--out", help="write the full page text to this JSON file")
+    unified.set_defaults(func=cmd_unified)
     return parser
 
 

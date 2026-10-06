@@ -26,6 +26,10 @@ ocr = []
 # actual cause of a stored password failing to load on Python 3.11), so it is
 # listed alongside rather than left to chance.
 keychain = ["keyring>=24", "importlib_metadata>=6"]
+# The Unified Portal (claims/KYC/transfers) authenticates only a real browser, so
+# `epfo-cli unified` drives one over CDP. Playwright is needed only for that
+# command; everything else runs on the stdlib.
+browser = ["playwright>=1.40"]
 dev = ["pytest>=7"]
 
 [project.scripts]

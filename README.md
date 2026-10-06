@@ -25,6 +25,7 @@ bottom instead of being papered over.
 | Employment history | **Verified live** — four establishments and their dates |
 | Profile / KYC fields | **Verified live** — name, DOB, Aadhaar, PAN, verifications |
 | Raising a claim | **Not possible** — the portal's claims module is disabled |
+| Unified Portal surface | **Mapped live, read-only** — the `unified` command walks claims/KYC/transfers through a real browser (see below) |
 | Change tracking | **Verified live** — a re-read reports nothing; a wiped store reports every row |
 | Passbook PDF generation | **Endpoint identified and called correctly; the portal itself answers with a NullPointerException** |
 | Install from scratch | **Verified** in a clean venv on Homebrew Python 3.13 |
@@ -85,6 +86,8 @@ epfo-cli profile                      # profile + KYC fields
 epfo-cli pdf                          # ask the portal for the passbook PDF
 epfo-cli export --out pf.json         # write balances to a file
 epfo-cli discover --out endpoints.json
+epfo-cli unified                      # read the claim surface (Unified Portal, browser)
+epfo-cli unified --out claims.json    # ...and save every page it read
 ```
 
 ### The other pages (`service-history`, `profile`)
@@ -260,9 +263,36 @@ of finding as the PDF endpoint — reachable, and broken by EPFO rather than by 
 request — and it is recorded rather than chased.
 
 The one claim-adjacent endpoint the portal *does* publish is
-`/passbook/api/ajax/check-uan-profile-service`, named (not called) in its JS. The
-live claim flow lives on the separate Unified Portal, which this client does not
-touch.
+`/passbook/api/ajax/check-uan-profile-service`, named (not called) in its JS.
+
+### The real claim flow is on the *other* portal — and it is now mapped
+
+The live claim flow lives on the separate **Unified Portal**
+(`unifiedportal-mem.epfindia.gov.in`), and `epfo-cli unified` reads its whole
+claim surface. It cannot be a plain HTTP client: the login POST was reproduced
+byte-for-byte in Python (password hash verified identical to the page's own) and
+**still** answered `302 → error.jsp` even when the captured POST body and the
+browser's cookies were replayed verbatim — the gate is a browser-level signal
+(WAF/TLS fingerprint), and the OTP is mandatory. So the command drives a real
+Chrome over CDP (`pip install 'epfo-cli[browser]'`), and the honest ceiling is a
+**browser-backed assistant**: it logs in, pauses for the human OTP, and reads the
+mapped pages. It cannot submit anything unattended.
+
+Everything it reads is recorded in full in
+[`docs/unified-portal-claims.md`](docs/unified-portal-claims.md): the complete
+nav, the claim page, KYC, transfers, and the blocker below.
+
+And it cannot file a claim anyway: the claim form
+(`/cenonline/claim/getReceipt`) never renders on this account — it answers with
+
+```text
+1. PLEASE UPDATE YOUR LATEST BANK ACCOUNT NUMBER AND VALID IFSC DETAILS
+   (USING MENU MANAGE >> KYC). 2. AVAILABLE IFSC (INVALIDIFSC) IS INVALID.
+```
+
+so the claim is blocked by KYC (no bank document), and fixing KYC is itself a
+**write** gated behind an Aadhaar OTP. `unified` reports the blocker; it does not
+pretend to clear it.
 
 ### Unattended runs
 
