@@ -1,0 +1,18 @@
+<!doctype html><html><body>
+<form id="loginform" method="post" action="/MemberPassBook/passbook/api/ajax/final/checkLogin">
+<input type="text" name="username" id="username"/>
+<input type="password" id="password" name="password"/>
+<input type="hidden" id="password1" name="password1"/>
+<input type="hidden" name="login-token" value="ANON_SESSION_BOUND_TOKEN_NOT_A_SECRET"/>
+<img id="captcha_id" src="data:image/jpg;base64,/9j/4AAQSkZJRgABAgAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIy"/>
+<input type="text" name="answer" id="answer"/>
+</form>
+<script>
+$("#loginform").submit(function(){
+  url: "/MemberPassBook/passbook/api/ajax/final/checkLogin",
+  data["username"] = a; data["password"] = b; data["token"] = c; data["answer"] = d
+});
+var passwordHash = CryptoJS.MD5(pass);
+var fhashValue = hex_sha512("kr9rk" + passwordHash.toString() + "kr9rk");
+</script>
+</body></html>

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epfo-cli"
+version = "0.1.0"
+description = "Command line client for the EPFO member passbook portal"
+requires-python = ">=3.10"
+# certifi is not optional in practice: python.org framework builds ship no CA
+# trust store, so without it every HTTPS request to the portal fails to verify.
+dependencies = ["certifi>=2023.7.22"]
+
+[project.optional-dependencies]
+# Two captcha readers, deliberately. `ddddocr` is a purpose-built captcha model
+# (offline ONNX, no training); `tesseract` is driven as a *binary* via
+# subprocess, so it needs no Python package at all - the pytesseract/Pillow
+# route resolved to a Pillow built for a different interpreter here
+# (ImportError: cannot import name '_imaging' from 'PIL') and silently disabled
+# OCR. Install either: `pip install 'epfo-cli[ddddocr]'` or
+# `brew install tesseract`. Both is better - they fail differently, and
+# `epfo-cli` alternates between them across login attempts.
+ddddocr = ["ddddocr>=1.5"]
+ocr = []
+# importlib_metadata is required by keyring on some interpreters (it was the
+# actual cause of a stored password failing to load on Python 3.11), so it is
+# listed alongside rather than left to chance.
+keychain = ["keyring>=24", "importlib_metadata>=6"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+epfo-cli = "epfo.cli:main"
+
+[tool.setuptools]
+packages = ["epfo", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
