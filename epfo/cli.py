@@ -30,6 +30,7 @@ from .config import (
 )
 from .crypto import encode_password
 from .discover import Endpoint, fetch_scripts, merge, scan_inline_params,     scan_source, write_report
+from .store import Observation, Store
 from .models import (parse_profile, parse_service_history,
                      parse_yearly_passbook)
 from .passbook import (
@@ -335,6 +336,49 @@ def cmd_passbook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_and_report(accounts, keep=None) -> int:
+    """Store the observation, print what changed, and exit non-zero on change.
+
+    The exit code is the point of the whole thing: a cron job can run
+    ``ledger --store`` and alert on a non-zero exit, so "tell me when a
+    contribution lands" needs no output parsing.
+    """
+    import datetime
+
+    seen_on = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    changes = Store().record(
+        [Observation(member_id=ledger.member_id or label,
+                     financial_year=ledger.financial_year or year,
+                     rows=ledger.rows)
+         for label, ledgers in accounts.items()
+         for year, ledger in ledgers.items()],
+        seen_on=seen_on, keep=keep)
+    if not changes:
+        print("no change since the last stored run")
+        return 0
+    print(f"{len(changes)} change(s) since the last stored run:")
+    for change in changes:
+        where = f"{change.member_id} {change.financial_year} {change.wage_month}"
+        print(f"  {change.kind:<8} {where:<48} {change.detail}")
+    return 1
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Report what is in the local store - no login, no portal request."""
+    store = Store()
+    rows = store.summary()
+    if not rows:
+        print("nothing is stored yet; run `epfo-cli ledger --store` first")
+        return 0
+    print(f"stored ledger  ({store.path})")
+    print(f"  last read {store.last_seen() or '(unknown)'}")
+    print()
+    width = max(len(m) for m in rows)
+    for member_id, count in rows.items():
+        print(f"  {member_id:<{width}}  {count:>3} row(s)")
+    return 0
+
+
 def cmd_ledger(args: argparse.Namespace) -> int:
     """Log in and print (or write) the month-by-month ledger.
 
@@ -415,6 +459,12 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     if accounts is None:
         return code
 
+    # With --store the exit code carries the answer: 0 = nothing changed,
+    # 1 = something did. That is what lets a cron job alert without parsing
+    # output. It is computed here and returned at the end, after the ledger has
+    # printed, because the table is still useful in a terminal.
+    change_code = _record_and_report(accounts, keep=args.keep) if args.store else 0
+
     if args.out:
         target = Path(args.out)
         if target.suffix == ".csv":
@@ -476,7 +526,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
             for title, values in ledger.summary.items():
                 print(f"  {title}: {', '.join(values)}")
             print()
-    return 0
+    return change_code
 
 
 def _fetch_nav_page(session, name: str, home_token: str) -> str:
@@ -846,7 +896,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="only this member id (or its last few digits)")
     ledger.add_argument("--out", help="write .json or .csv here")
     _add_credential_flags(ledger)
+    ledger.add_argument("--store", action="store_true",
+                        help="remember this read locally and report what changed")
+    ledger.add_argument("--keep", type=int, metavar="YEARS",
+                        help="with --store, keep only the N most recent years")
     ledger.set_defaults(func=cmd_ledger)
+
+    status = sub.add_parser(
+        "status", help="report the locally stored ledger (no login)")
+    status.set_defaults(func=cmd_status)
 
     history = sub.add_parser(
         "service-history", help="print the employment history per establishment")

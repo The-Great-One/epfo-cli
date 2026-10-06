@@ -25,6 +25,7 @@ bottom instead of being papered over.
 | Employment history | **Verified live** — four establishments and their dates |
 | Profile / KYC fields | **Verified live** — name, DOB, Aadhaar, PAN, verifications |
 | Raising a claim | **Not possible** — the portal's claims module is disabled |
+| Change tracking | **Verified live** — a re-read reports nothing; a wiped store reports every row |
 | Passbook PDF generation | **Endpoint identified and called correctly; the portal itself answers with a NullPointerException** |
 | Install from scratch | **Verified** in a clean venv on Homebrew Python 3.13 |
 | TLS against the portal | **Verified**, including on a Python with no CA trust store |
@@ -75,6 +76,9 @@ epfo-cli ledger                       # the whole passbook: every member, every 
 epfo-cli ledger --out ledger.csv      # ...as CSV (.json also supported)
 epfo-cli ledger --year 2025           # a specific financial year
 epfo-cli ledger --member 070329       # one member account (id or trailing digits)
+epfo-cli ledger --store               # remember this read; exit 1 if anything changed
+epfo-cli ledger --store --keep 3      # ...keeping only the 3 most recent years
+epfo-cli status                       # what's stored, when it was last read
 epfo-cli service-history              # employment history per establishment
 epfo-cli service-history --json       # ...as JSON (--out to write a file)
 epfo-cli profile                      # profile + KYC fields
@@ -117,6 +121,40 @@ page-wide label sweep would collapse every employer into one set of values.
 `profile` prints the personal and KYC fields. The nav entries use the same
 label/value markup as the data fields, so the parse is scoped to the details
 region and the chrome labels are excluded by name.
+
+### Watching it change (`--store`, `status`)
+
+The portal shows the current state and keeps no history, so every command above is
+a snapshot you have to eyeball. `--store` remembers each read locally and reports
+**what is different from last time**, which is what makes this runnable on a
+schedule:
+
+```text
+$ epfo-cli ledger --store
+captcha 3WAZMU (read automatically via ddddocr)
+4 change(s) since the last stored run:
+  new      GNGGN00000000000000001 2026 - 2027 May-2026  01-06-2026 employee 3,600.00 employer 3,600.00
+  ...
+$ epfo-cli ledger --store          # a second, unchanged run
+no change since the last stored run
+```
+
+**The exit code carries the answer**: `0` = nothing changed, `1` = something did.
+That is the whole point — a cron job alerts on a non-zero exit and never has to
+parse the output. The state lives in `~/.epfo-cli/ledger.sqlite` (`0600`, beside
+the config), and `epfo-cli status` reports it **without logging in**.
+
+Three differences are reported, including one that a naive diff would hide:
+
+- **`new`** — a month that appeared;
+- **`changed`** — a figure that moved, printed as `3,600.00 → 4,500.00`;
+- **`missing`** — a row that *was* stored and was not returned this run. Silent
+  deletion is exactly the kind of change worth knowing about, so it is reported
+  rather than pruned.
+
+Money is compared to the paise, so a re-read of unchanged data does not register as
+a change through binary rounding. `--keep N` keeps only the N most recent financial
+years for an account that has been contributing for years.
 
 ### The full ledger (`ledger`, `pdf`)
 
@@ -414,7 +452,7 @@ even for your own account. Use it on accounts you own.
 ## Tests
 
 ```bash
-python -m pytest -q     # 159 tests
+python -m pytest -q     # 176 tests
 ```
 
 The discovery and session tests run against the portal's **real** login page,

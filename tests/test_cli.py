@@ -10,8 +10,88 @@ from epfo.cli import build_parser, main
 
 def test_parser_exposes_every_documented_command():
     choices = build_parser()._subparsers._group_actions[0].choices
-    for command in ("login", "discover", "passbook", "export", "config", "doctor"):
+    for command in ("login", "discover", "passbook", "export", "config",
+                    "doctor", "ledger", "service-history", "profile",
+                    "pdf", "status"):
         assert command in choices
+
+
+def test_ledger_offers_store_and_keep():
+    sub = build_parser()._subparsers._group_actions[0].choices["ledger"]
+    flags = {o for a in sub._actions for o in a.option_strings}
+    assert "--store" in flags and "--keep" in flags
+
+
+def _ledger_tree():
+    """One member, one year, one contribution row - enough to diff."""
+    from epfo.models import parse_yearly_passbook
+    fragment = (
+        '<div class="pb-heading">Passbook for Member Id : [ <b class="color-primary">'
+        'M1</b> ] [ <b>2026 - 2027</b> ]</div>'
+        '<table><tr><th>Wage Month (12%)</th><th>Transaction Date</th>'
+        '<th>Type</th><th>Particulars</th><th>EPF Wages</th><th>EPS Wages</th>'
+        '<th>Employee Share (12%)</th><th>Employer Share (3.67%)</th>'
+        '<th>Pension Share (8.33%)</th></tr>'
+        '<tr><td>May-2026</td><td>01-06-2026</td><td>+</td><td>Contribution</td>'
+        '<td>30,000</td><td>30,000</td><td>3,600</td><td>3,600</td><td>0</td></tr>'
+        '</table>')
+    return {"M1": {"2026": parse_yearly_passbook(fragment)}}
+
+
+def _run_ledger_store(monkeypatch, tmp_path, **extra):
+    """Drive cmd_ledger through main() with the network replaced."""
+    from epfo import cli, config, store as store_module
+
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "load_profile",
+                        lambda: config.Profile(uan="100123456789"))
+    monkeypatch.setattr(cli, "load_password", lambda uan: "pw")
+    monkeypatch.setattr(cli, "_session_from_profile", lambda p: object())
+    monkeypatch.setattr(cli, "_authenticated_read",
+                        lambda *a, **k: (_ledger_tree(), 0))
+    args = ["ledger", "--store"] + [str(x) for x in extra.get("argv", [])]
+    return main(args)
+
+
+def test_ledger_store_exits_1_when_something_changed(monkeypatch, tmp_path, capsys):
+    # The exit code IS the feature: a cron job alerts on non-zero without
+    # parsing output. A first run stores everything, so something changed.
+    assert _run_ledger_store(monkeypatch, tmp_path) == 1
+    assert "change(s) since the last stored run" in capsys.readouterr().out
+
+
+def test_ledger_store_exits_0_when_nothing_changed(monkeypatch, tmp_path, capsys):
+    # ...and a second identical run must be silent and exit 0, or every
+    # scheduled run alerts.
+    assert _run_ledger_store(monkeypatch, tmp_path) == 1
+    capsys.readouterr()
+    assert _run_ledger_store(monkeypatch, tmp_path) == 0
+    assert "no change" in capsys.readouterr().out
+
+
+def test_ledger_without_store_does_not_touch_the_store(monkeypatch, tmp_path):
+    from epfo import cli, config, store as store_module
+
+    _isolate_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "load_profile",
+                        lambda: config.Profile(uan="100123456789"))
+    monkeypatch.setattr(cli, "load_password", lambda uan: "pw")
+    monkeypatch.setattr(cli, "_session_from_profile", lambda p: object())
+    monkeypatch.setattr(cli, "_authenticated_read",
+                        lambda *a, **k: (_ledger_tree(), 0))
+    assert main(["ledger"]) == 0
+    assert not (tmp_path / "ledger.sqlite").exists()
+
+
+def test_status_reads_the_store_without_logging_in(capsys, monkeypatch, tmp_path):
+    """status must not touch the portal, so an empty store is not an error."""
+    from epfo import store as store_module
+
+    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    assert main(["status"]) == 0
+    assert "nothing is stored yet" in capsys.readouterr().out
 
 
 def test_main_requires_a_subcommand(capsys):
