@@ -227,3 +227,121 @@ def test_plain_opener_returns_an_opener():
     from epfo.session import plain_opener
 
     assert hasattr(plain_opener(), "open")
+
+
+# -- regression: the parallel pre-warmed connection pool ---------------------
+
+
+class _FakeConn:
+    """Stands in for an http.client.HTTPSConnection in the pool tests."""
+
+    def __init__(self, request_error=None, will_close=True):
+        self.request_error = request_error
+        self.will_close = will_close
+        self.requests = []
+
+    def connect(self):
+        pass
+
+    def request(self, method, path, body=None, headers=None):
+        if self.request_error is not None:
+            raise self.request_error
+        self.requests.append((method, path))
+
+    def getresponse(self):
+        return _FakeResp(self.will_close)
+
+    def close(self):
+        pass
+
+
+class _FakeResp:
+    def __init__(self, will_close):
+        self.status = 200
+        self.headers = _FakeHeaders()
+        self.will_close = will_close
+
+    def read(self):
+        return b"<html>ok</html>"
+
+
+class _FakeHeaders(dict):
+    """Mimics http.client.HTTPMessage closely enough for _absorb_cookies."""
+
+    def get_all(self, name, default=None):
+        return [v for k, v in self.items() if k.lower() == name.lower()] or default
+
+
+def _pooled_session(monkeypatch, factory, size):
+    from urllib.request import Request
+
+    from epfo import session as mod
+
+    monkeypatch.setattr(mod._ConnOpener, "POOL_SIZE", size)
+    monkeypatch.setattr(mod._ConnOpener, "_new_conn", lambda self: factory())
+    return mod.EPFOSession(), Request
+
+
+def test_pool_prewarms_all_sockets_and_never_reuses_one(monkeypatch):
+    """N sockets open up front, one request each.
+
+    Reusing a socket would fail against the real server, which closes them -
+    so a pooled connection must serve exactly one request.
+    """
+    created = []
+
+    def factory():
+        conn = _FakeConn()
+        created.append(conn)
+        return conn
+
+    sess, Request = _pooled_session(monkeypatch, factory, size=3)
+    for _ in range(3):
+        sess._opener.open(Request("https://passbook.epfindia.gov.in/MemberPassBook/x"))
+    assert len(created) == 3
+    assert all(len(c.requests) == 1 for c in created)
+
+
+def test_pool_refills_when_it_runs_dry(monkeypatch):
+    created = []
+
+    def factory():
+        conn = _FakeConn()
+        created.append(conn)
+        return conn
+
+    sess, Request = _pooled_session(monkeypatch, factory, size=2)
+    for _ in range(5):  # more requests than the pool held
+        sess._opener.open(Request("https://passbook.epfindia.gov.in/MemberPassBook/x"))
+    assert len(created) == 6  # refills in POOL_SIZE batches: 2 + 2 + 2
+
+
+def test_pool_recovers_from_a_socket_the_server_already_killed(monkeypatch):
+    """A warmed socket can die before use; the request must still succeed."""
+    import http.client
+
+    made = {"n": 0}
+
+    def factory():
+        made["n"] += 1
+        if made["n"] == 1:
+            return _FakeConn(request_error=http.client.CannotSendRequest("dead"))
+        return _FakeConn()
+
+    sess, Request = _pooled_session(monkeypatch, factory, size=1)
+    resp = sess._opener.open(Request("https://passbook.epfindia.gov.in/MemberPassBook/x"))
+    assert resp.read() == b"<html>ok</html>"
+
+
+def test_pool_size_is_configurable_by_env(monkeypatch):
+    import importlib
+
+    from epfo import session as mod
+
+    monkeypatch.setenv("EPFO_POOL_SIZE", "7")
+    importlib.reload(mod)
+    try:
+        assert mod._ConnOpener.POOL_SIZE == 7
+    finally:
+        monkeypatch.delenv("EPFO_POOL_SIZE", raising=False)
+        importlib.reload(mod)

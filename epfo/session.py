@@ -200,7 +200,7 @@ class _ConnOpener:
             try:
                 replacement.request(method, path, body=body, headers=headers)
                 resp = replacement.getresponse()
-                raw = replacement.read()
+                raw = resp.read()
             except (http.client.HTTPException, OSError) as exc2:
                 raise HTTPError(url, 0, "connection dropped: %s" % exc2,
                                 None, None) from exc2
