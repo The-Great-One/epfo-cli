@@ -1,9 +1,10 @@
 # Scoping: the Unified Portal (`unifiedportal-mem.epfindia.gov.in`)
 
-**Status: scoped, and the deciding question answered — the login is OTP-gated.**
-One scripted login was run with the real credentials; it succeeded and revealed the
-gate (see "Verified" below). Nothing past the OTP door was examined, and no OTP was
-requested or entered.
+**Status: logged in end-to-end, and the account turns out to be parked behind a
+forced password change.** A real browser drove the whole login (credentials → OTP →
+past the door). What it found: the OTP step **cannot** be completed by a
+hand-rolled POST, and the account cannot reach the dashboard until its password is
+changed via an **Aadhaar OTP**. Full detail in "Verified live" below.
 
 Recorded 2026-10-06, on the live site.
 
@@ -159,27 +160,87 @@ No OCR, no captcha, no browser. The remaining work is the **post-login** half:
 whether the app issues `session-exception`-style token churn, how OTP gates KYC/claim
 submission, and whether it enforces one-session-per-user.
 
-## Unknowns, and the one that decides the project
+## Verified live: the login completes, and the account is blocked by a forced
+## password change
 
-1. ~~Does a claim submission require an OTP?~~ **Answered: yes, and earlier than
-   expected** — the OTP is demanded at login (`/ekyc/otpLogin`), before any
-   dashboard. See above.
-2. **What the session is worth once the OTP is cleared** — unknown, because the OTP
-   step was never completed. Everything past the door is still unexamined.
-3. **Whether the concurrency guard blocks automation** (`isConcurrent`, the
-   `concurrentSession()` handler). It was submitted as the page's own `false` and
-   did not appear to interfere.
+A real Chrome (Playwright, `channel="chrome"`, headed) drove the whole flow:
+type UAN + password into the **visible** fields, click **Sign in** and let the
+page's own `authentication.js` do the hashing/AES, then type the OTP into the OTP
+page and let its own `OtpLogin.js` encrypt and submit it.
 
-The login step is now done. **The OTP itself was never requested or entered** — the
-redirect was read, the OTP page was never rendered, and no code was sent to the
-account holder's phone. What remains needs the account holder present.
+```text
+Member Home → click Sign in            → 303 → /memberinterface/ekyc/otpLogin
+enter OTP (6 digits)                    → POST /memberinterface/ekyc/verifyMobile
+                                        → /memberinterface/no_auth/changePass/changePassword?firstLogin=true
+                                          title: "EPFO: Password Change"
+                                          "Your Password is Expired. Kindly update your password."
+```
 
-## Recommended next step
+So the OTP login **does** succeed — but the landing page is a **forced password
+change**, not a dashboard. This account (`…8727`) cannot reach the member dashboard
+until its password is changed.
 
-A second scoping session, with the account holder present and the OTP phone in hand,
-to log in once through a script and dump the post-login page and nav — the same move
-that unlocked `epfo-cli`. Only after that is it worth writing any parser.
+### The OTP step rejects a hand-rolled POST; drive the page instead
 
-Do **not** start by writing a claim-submitting client. Establish first whether the
-write path is reachable without an interactive OTP; if it is not, say so plainly and
-scope what *is* reachable.
+The same OTP was tried three ways, on three different codes, and **only the browser
+worked**:
+
+| attempt | how the OTP was sent | result |
+|---|---|---|
+| 1 | plain 6 digits in `otpEnt.otp` | `302 → /error.jsp` |
+| 2 | `base64(iv[12] ‖ AES-GCM(dataId, iv, otp))`, my own POST | `302 → /error.jsp` |
+| 3 | typed into `#otp`, page's own `encryptOTP()` + click | **OK → password-change page** |
+
+The encryption was not the difference — Python's AES-GCM matches the page's
+`encryptAesGcm` byte-for-byte. What the browser added was the **submit-time request
+the page actually makes**: the `otpEnt.otpId` / `otpEnt.userId` / `user.hidPassword`
+/ `user.encrChallenge` hidden values, the exact `_HDIV_STATE_` for the submit, and
+the page's own session cookies, all in flight together. Replaying those from a
+script is possible in principle but was never made to work. **Conclusion: for the
+OTP step, use a browser driver; do not re-derive the submit.**
+
+`epfo-cli` has no browser driver (deliberate — the passbook portal did not need
+one). Adding Playwright as an optional extra is the prerequisite for automating
+this step at all.
+
+### Two more traps on this portal
+
+- **A page-load notice modal blocks every click.** `mainHomePageAlertModal`
+  ("Dear EPF Members!!") auto-opens on `Member Home`; until it is dismissed
+  (`#btnCloseModal`, or Escape) every `click()` is intercepted by the overlay. The
+  concurrency modal (`#concurrenttSessionAlert` with `#loginHereButton`) is a
+  *separate*, conditional one and is also always in the DOM.
+- **Headless Chromium is WAF-blocked** (`The URL you requested has been blocked`).
+  Real Chrome (`channel="chrome"`) passes; a plain `urllib` fetch with a normal
+  User-Agent also passes. It is the headless fingerprint, not the IP.
+
+### The forced password change needs an Aadhaar OTP
+
+The change-password page offers a normal form (old / new / confirm) *and* an
+Aadhaar path ("मैं पासवर्ड रीसेट … आधार आधारित प्रमाणीकरण", "Get AADHAAR OTP"). The
+new-password rules are strict:
+
+```text
+regex = (?=^.{8,20}$)(?=(.*\d){2,})(?=(.*[A-Za-z]){4,})(?=.*[A-Z])(?=.*[a-z])(?=.*[!@#$%^&*?])(?!.*\s)
+        → 8–20 chars, ≥2 digits, ≥1 upper, ≥1 lower, ≥1 symbol from !@#$%^&*?
+```
+
+Changing the password is a real credential change on a UAN, so it was **not** done;
+that decision belongs to the account holder.
+
+## What this means for the product
+
+- **A CLI cannot raise a claim unattended.** The OTP gate is at login, and the
+  login now also demands a password reset (Aadhaar OTP). The honest ceiling is a
+  tool that *prepares* a claim and stops for the human.
+- **The realistic first client is a browser-driven one** (`prepare-a-claim`, fill
+  and validate the form, stop at the OTP), not a headless HTTP client.
+- **Before any of that**, the account must first clear the forced password change —
+  a one-time interactive step with the Aadhaar OTP.
+
+## Next step
+
+1. Account holder changes the EPFO password (Aadhaar OTP; rules above). One-time.
+2. Then a browser-driven login, and dump the real dashboard/nav to see which of
+   claims / transfers / KYC is actually reachable for this UAN.
+3. Only then decide whether a claim-preparation client is worth building.
