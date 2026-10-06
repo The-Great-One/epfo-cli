@@ -22,17 +22,16 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-STORE_DIR = Path(os.environ.get("EPFO_CLI_HOME", Path.home() / ".epfo-cli"))
-
 
 def default_store_path() -> Path:
-    """Where the store lives, read at call time.
+    """Where the store lives: beside the config, resolved on every call.
 
-    Deliberately a function, not a module constant: a ``path=STORE_PATH`` default
-    argument binds at import, so a test (or a user setting ``EPFO_CLI_HOME``
-    later) cannot redirect it and the operator's real store leaks into the test.
+    Deliberately neither a module constant nor a default argument — both bind at
+    import, so the operator's real store would leak into tests and ``EPFO_CLI_HOME``
+    could not redirect it. (``config.CONFIG_PATH`` has that flaw; do not copy it.)
     """
-    return STORE_DIR / "ledger.sqlite"
+    home = os.environ.get("EPFO_CLI_HOME") or Path.home() / ".epfo-cli"
+    return Path(home) / "ledger.sqlite"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS contribution (
@@ -180,6 +179,13 @@ class Store:
                 "SELECT member_id, COUNT(*) AS n FROM contribution "
                 "GROUP BY member_id ORDER BY member_id")}
 
+    def years(self) -> list[str]:
+        """The financial years held, newest first."""
+        with self._connect() as conn:
+            return [r["financial_year"] for r in conn.execute(
+                "SELECT DISTINCT financial_year FROM contribution "
+                "ORDER BY financial_year DESC")]
+
     def last_seen(self) -> str:
         with self._connect() as conn:
             row = conn.execute("SELECT MAX(last_seen) AS t FROM contribution").fetchone()
@@ -195,10 +201,7 @@ class Store:
         if not keep or keep <= 0:
             return
         with self._connect() as conn:
-            years = [r["financial_year"] for r in conn.execute(
-                "SELECT DISTINCT financial_year FROM contribution "
-                "ORDER BY financial_year DESC")]
-            for year in years[keep:]:
+            for year in self.years()[keep:]:
                 conn.execute("DELETE FROM contribution WHERE financial_year = ?",
                              (year,))
 

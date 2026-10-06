@@ -372,6 +372,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"stored ledger  ({store.path})")
     print(f"  last read {store.last_seen() or '(unknown)'}")
+    print(f"  years     {', '.join(reversed(store.years())) or '(none)'}")
     print()
     width = max(len(m) for m in rows)
     for member_id, count in rows.items():

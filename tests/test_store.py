@@ -123,24 +123,18 @@ def test_keep_prunes_older_years(tmp_path):
     store.record([Observation("M1", "2026 - 2027", [_row("May-2026")])],
                  seen_on="2026-10-06T10:00:00+05:30", keep=1)
     assert list(store.summary()) == ["M1"]
-    from epfo.store import Store as _S
-    with _S(path=store.path)._connect() as conn:
-        years = {r["financial_year"] for r in conn.execute(
-            "SELECT financial_year FROM contribution")}
-    assert years == {"2026 - 2027"}
+    assert store.years() == ["2026 - 2027"]
 
 
 def test_store_defaults_to_the_config_directory(tmp_path, monkeypatch):
-    # The real store must never be written by a test: the default is resolved at
-    # call time so EPFO_CLI_HOME can redirect it.
+    # The real store must never be written by a test, so the default resolves at
+    # call time and EPFO_CLI_HOME can redirect it - no module reload needed.
+    from epfo.store import default_store_path
+
     monkeypatch.setenv("EPFO_CLI_HOME", str(tmp_path))
-    import importlib
-    from epfo import store as store_module
-    importlib.reload(store_module)
-    try:
-        assert store_module.default_store_path() == tmp_path / "ledger.sqlite"
-    finally:
-        importlib.reload(store_module)
+    assert default_store_path() == tmp_path / "ledger.sqlite"
+    monkeypatch.setenv("EPFO_CLI_HOME", str(tmp_path / "other"))
+    assert default_store_path() == tmp_path / "other" / "ledger.sqlite"
 
 
 def test_the_store_file_is_not_world_readable(tmp_path):

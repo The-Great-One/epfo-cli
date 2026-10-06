@@ -40,10 +40,10 @@ def _ledger_tree():
 
 def _run_ledger_store(monkeypatch, tmp_path, **extra):
     """Drive cmd_ledger through main() with the network replaced."""
-    from epfo import cli, config, store as store_module
+    from epfo import cli, config
 
     _isolate_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setenv("EPFO_CLI_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "load_profile",
                         lambda: config.Profile(uan="100123456789"))
     monkeypatch.setattr(cli, "load_password", lambda uan: "pw")
@@ -71,10 +71,10 @@ def test_ledger_store_exits_0_when_nothing_changed(monkeypatch, tmp_path, capsys
 
 
 def test_ledger_without_store_does_not_touch_the_store(monkeypatch, tmp_path):
-    from epfo import cli, config, store as store_module
+    from epfo import cli, config
 
     _isolate_config(monkeypatch, tmp_path)
-    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setenv("EPFO_CLI_HOME", str(tmp_path))
     monkeypatch.setattr(cli, "load_profile",
                         lambda: config.Profile(uan="100123456789"))
     monkeypatch.setattr(cli, "load_password", lambda uan: "pw")
@@ -87,9 +87,7 @@ def test_ledger_without_store_does_not_touch_the_store(monkeypatch, tmp_path):
 
 def test_status_reads_the_store_without_logging_in(capsys, monkeypatch, tmp_path):
     """status must not touch the portal, so an empty store is not an error."""
-    from epfo import store as store_module
-
-    monkeypatch.setattr(store_module, "STORE_DIR", tmp_path)
+    monkeypatch.setenv("EPFO_CLI_HOME", str(tmp_path))
     assert main(["status"]) == 0
     assert "nothing is stored yet" in capsys.readouterr().out
 
