@@ -22,6 +22,9 @@ bottom instead of being papered over.
 | Automatic session refresh | **Implemented + unit-tested** — re-auths once on a lapse |
 | Credential persistence | **Verified live** — stored, reloaded, no password prompt |
 | Per-month transaction rows | **Verified live** — the yearly ledger, month by month |
+| Employment history | **Verified live** — four establishments and their dates |
+| Profile / KYC fields | **Verified live** — name, DOB, Aadhaar, PAN, verifications |
+| Raising a claim | **Not possible** — the portal's claims module is disabled |
 | Passbook PDF generation | **Endpoint identified and called correctly; the portal itself answers with a NullPointerException** |
 | Install from scratch | **Verified** in a clean venv on Homebrew Python 3.13 |
 | TLS against the portal | **Verified**, including on a Python with no CA trust store |
@@ -29,27 +32,30 @@ bottom instead of being papered over.
 ## Install
 
 ```bash
-cd ~/Desktop/Projects/epfo-cli
-python3 -m venv .venv               # use a venv: see the PYTHONPATH note below
-env -u PYTHONPATH .venv/bin/python -m pip install -e .
-env -u PYTHONPATH .venv/bin/python -m pip install -e '.[keychain]'   # password in the OS keychain
-env -u PYTHONPATH .venv/bin/python -m pip install -e '.[ddddocr]'    # the better captcha reader
-brew install tesseract                                               # the fallback reader
+git clone https://github.com/The-Great-One/epfo-cli && cd epfo-cli
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .                 # required: certifi only
+.venv/bin/python -m pip install -e '.[keychain]'    # password in the OS keychain
+.venv/bin/python -m pip install -e '.[ddddocr]'     # the better captcha reader
+brew install tesseract                              # the fallback reader
 ```
 
-Verified in a clean virtualenv: the only mandatory package is `certifi` and
-`epfo-cli` itself.
+The only mandatory dependency is `certifi` (the portal's TLS chain is not in a
+stock trust store on every Python). The two extras are optional and independent:
+without `keychain` the CLI prompts for the password, without `ddddocr` it falls
+back to tesseract, and without either it still runs.
 
-> **`env -u PYTHONPATH` is not decoration.** This machine exports `PYTHONPATH`
-> pointing at another toolchain's `python3.14` site-packages. It leaks into
-> every interpreter, so `pip` decides Pillow/numpy are already installed and
-> skips them, and the imports that remain resolve to wrong-interpreter builds
-> (`ImportError: cannot import name '_imaging' from 'PIL'`). Strip it whenever
-> you install or run here. Do **not** install these into a shared or runtime
-> interpreter — ddddocr pulls in ~200 MB of numpy/onnxruntime/opencv and can
-> move a pinned numpy version out from under another application.
+> **Install into the venv, never a shared interpreter.** `.[ddddocr]` pulls in
+> roughly 200 MB of `numpy`/`onnxruntime`/`opencv` and can move a pinned `numpy`
+> version out from under another application.
+>
+> If your shell exports `PYTHONPATH` (some toolchains do), strip it for these
+> commands with `env -u PYTHONPATH …`. A leaked `PYTHONPATH` makes `pip` believe
+> Pillow/numpy are already installed, skips them, and leaves imports resolving
+> to another interpreter's builds — which surfaces later as
+> `ImportError: cannot import name '_imaging' from 'PIL'`.
 
-Day to day, just use the venv's own command:
+Then just use the venv's own command:
 
 ```bash
 .venv/bin/epfo-cli passbook
@@ -198,6 +204,27 @@ Jul-2026   17-09-2026        30,000    3,600.00    3,600.00      0.00
 Aug-2026   17-09-2026        30,000    3,600.00    3,600.00      0.00
 Total Contributions for the year [ 2026 ]: ₹ 14,400, ₹ 14,400, ₹ 0
 ```
+
+### Claims — can this raise one? No, and it is not our side
+
+`epfo-cli` cannot raise a claim, and no client can: **the portal's claims module is
+switched off.** `/claims` renders 16,842 bytes with **zero** `<input>` elements,
+one `<button>`, and no claim endpoint anywhere — only the site nav, the member's
+name, and:
+
+```text
+This module is temporarily unavailable. We regret the inconvenience.
+```
+
+under a build stamp of `Ver - 1.2.25, 01-Aug-2026`. There is no form to submit and
+no endpoint to call; `claims` is not wrapped as a command. This is the same class
+of finding as the PDF endpoint — reachable, and broken by EPFO rather than by the
+request — and it is recorded rather than chased.
+
+The one claim-adjacent endpoint the portal *does* publish is
+`/passbook/api/ajax/check-uan-profile-service`, named (not called) in its JS. The
+live claim flow lives on the separate Unified Portal, which this client does not
+touch.
 
 ### Unattended runs
 
@@ -368,31 +395,52 @@ call sends. It independently recovers the four-field login contract from the liv
 page, which is how the extraction was validated. It does not call privileged
 endpoints.
 
+## Scope, and what is *not* in this repo
+
+This is a **read-only** client for **your own** account. It logs in with your
+credentials and reads pages the portal serves you; it changes nothing, and it
+does not touch the Unified Portal (the separate site that handles claims,
+transfers and KYC edits).
+
+No account data is checked in. Every UAN, member id, balance and name in the
+repository is a placeholder or synthesised; the live figures in this README are
+the account owner's own and are published with their consent. The password is
+never written to a file anywhere — it lives in the OS keychain, and the code has
+no path that serialises it.
+
+Before using this, read the portal's terms: automating a login may be restricted
+even for your own account. Use it on accounts you own.
+
 ## Tests
 
 ```bash
-python -m pytest -q     # 121 tests
+python -m pytest -q     # 159 tests
 ```
 
 The discovery and session tests run against the portal's **real** login page,
 trimmed to its structural parts. The passbook-client tests use response shapes
-copied from live captures. `tests/fixtures_passbook.html` is **synthetic** and is
-labelled as such.
+copied from live captures with every account value replaced.
+`tests/fixtures_passbook.html` is **synthetic** and is labelled as such, and
+`tests/test_profile_and_history.py` uses captured markup with the personal values
+swapped out.
 
 ## Honest gaps
 
-1. **Per-month transaction rows are not retrievable.** Balances are the portal's
-   own figures, but the endpoint that serves the month-by-month ledger was not
-   identified. `epfo/models.parse_passbook` — the parser for such a page — is
-   therefore **not used by the CLI**, is calibrated against a synthetic fixture,
-   and has never seen a real page. Treat it as unverified.
-2. **OTP is not submitted.** On an unrecognised device the portal returns an OTP
+1. **`claims` is closed on the portal's side.** The page renders no form, no
+   inputs and no claim endpoints; it prints *"This module is temporarily
+   unavailable. We regret the inconvenience."* under a build stamp of
+   `Ver - 1.2.25, 01-Aug-2026` (see "Claims" below). Nothing here can raise a
+   claim.
+2. **`models.parse_passbook` (the *summary* parser) is unused by the CLI.** The
+   ledger uses `parse_yearly_passbook`. It is calibrated against a synthetic
+   fixture and has never seen a real page — treat it as unverified.
+3. **OTP is not submitted.** On an unrecognised device the portal returns an OTP
    panel instead of a session. The client detects this and exits 4 rather than
    pretending it logged in.
-3. **OCR accuracy is bounded.** Tesseract is right often enough to be useful
+4. **OCR accuracy is bounded.** Tesseract is right often enough to be useful
    and wrong often enough to matter — one live unattended run needed two
    captcha attempts before it succeeded. This is why the retry bound is
    generous, the reading is never trusted silently, and the human path remains.
-4. **Login is short-lived by design.** Every credentialed command reads a fresh
+5. **Login is short-lived by design.** Every credentialed command reads a fresh
    captcha. That is the portal's behaviour, not a limitation this client can
    remove.
