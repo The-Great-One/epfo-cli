@@ -30,7 +30,8 @@ from .config import (
 )
 from .crypto import encode_password
 from .discover import Endpoint, fetch_scripts, merge, scan_inline_params,     scan_source, write_report
-from .models import parse_yearly_passbook
+from .models import (parse_profile, parse_service_history,
+                     parse_yearly_passbook)
 from .passbook import (
     ARCH_PATH,
     LedgerClient,
@@ -478,6 +479,97 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fetch_nav_page(session, name: str, home_token: str) -> str:
+    """Fetch one of the portal's nav pages by the token the home page gives it.
+
+    The tokens are the portal's own: each is published in the nav markup of the
+    page you are on and is consumed by navigating with it. Reading the token off
+    the home page and fetching the target in one hop is what works; reusing a
+    token harvested from a *different* page answers ``invalid-token``.
+    """
+    home = PassbookClient(session).home(home_token)
+    token = nav_tokens(home).get(name)
+    if not token:
+        raise EPFOError(
+            f"the home page did not publish a token for {name!r}; the nav menu "
+            "may have changed")
+    return session.get(f"/{name}?token={token}")
+
+
+def cmd_service_history(args: argparse.Namespace) -> int:
+    """Print the employment history: each establishment and the stint in it."""
+    profile = load_profile()
+    resolved = _resolve_credentials(args, profile)
+    if resolved is None:
+        return 2
+    uan, password = resolved
+
+    session = _session_from_profile(profile)
+
+    def read(token: str):
+        return parse_service_history(
+            _fetch_nav_page(session, "service-history", token))
+
+    history, code = _authenticated_read(
+        session, uan, password, auto_captcha=args.auto_captcha,
+        attempts=args.attempts, read=read)
+    if history is None:
+        return code
+
+    if _emit(args, history.as_dict(), "service history"):
+        return 0
+    for note in history.notes:
+        print(f"note: {note}", file=sys.stderr)
+    for label, value in (("Total experience", history.total_experience),
+                         ("Date of joining", history.date_of_joining),
+                         ("Total NCP days", history.total_ncp_days)):
+        if value:
+            print(f"{label}: {value}")
+    print()
+    if not history.records:
+        print("no establishment records were returned")
+        return 0
+    # The longest service string is 24 characters ("2 Years 4 Months 28 Days"),
+    # so the column is padded wider than that or it runs into the ncp column.
+    print(f"  {'employer':<42}{'joining':<13}{'exit':<13}"
+          f"{'service':<26}{'ncp':<8}")
+    for record in history.records:
+        print(f"  {record.employer[:41]:<42}{record.joining_date or '-':<13}"
+              f"{record.exit_date or '-':<13}{record.total_service or '-':<26}"
+              f"{record.ncp_days or '-':<8}")
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    """Print the profile page's fields (personal and KYC details)."""
+    profile = load_profile()
+    resolved = _resolve_credentials(args, profile)
+    if resolved is None:
+        return 2
+    uan, password = resolved
+
+    session = _session_from_profile(profile)
+
+    def read(token: str):
+        return parse_profile(_fetch_nav_page(session, "profile", token))
+
+    fields, code = _authenticated_read(
+        session, uan, password, auto_captcha=args.auto_captcha,
+        attempts=args.attempts, read=read)
+    if fields is None:
+        return code
+
+    if _emit(args, fields, "profile"):
+        return 0
+    if not fields:
+        print("no profile fields were returned")
+        return 0
+    width = max(len(k) for k in fields)
+    for label, value in fields.items():
+        print(f"  {label:<{width}}  {value}")
+    return 0
+
+
 def cmd_pdf(args: argparse.Namespace) -> int:
     """Ask the portal to generate the passbook PDF and save it."""
     profile = load_profile()
@@ -689,6 +781,31 @@ def _add_credential_flags(parser: argparse.ArgumentParser) -> None:
                         help="read the password from stdin (unattended runs)")
 
 
+def _add_output_flags(parser: argparse.ArgumentParser) -> None:
+    """The flags the read-only reporting commands share."""
+    parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.add_argument("--out", help="write the JSON report here")
+
+
+def _emit(args: argparse.Namespace, payload, what: str) -> bool:
+    """Write ``--out`` and/or print ``--json``; True when JSON was printed.
+
+    The commands that use this read a *page*, not the ledger, so the
+    human-readable table is drawn by each command. Returning True on ``--json``
+    lets them skip it - otherwise a ``--json`` run would print JSON *and* the
+    table, which nothing can parse.
+    """
+    if args.out:
+        target = Path(args.out)
+        target.write_text(json.dumps(payload, indent=2, default=str),
+                          encoding="utf-8")
+        print(f"wrote {what} to {target.resolve()}")
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return True
+    return False
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="epfo-cli",
@@ -729,6 +846,19 @@ def build_parser() -> argparse.ArgumentParser:
     ledger.add_argument("--out", help="write .json or .csv here")
     _add_credential_flags(ledger)
     ledger.set_defaults(func=cmd_ledger)
+
+    history = sub.add_parser(
+        "service-history", help="print the employment history per establishment")
+    history.add_argument("--uan")
+    _add_credential_flags(history)
+    _add_output_flags(history)
+    history.set_defaults(func=cmd_service_history)
+
+    who = sub.add_parser("profile", help="print profile / KYC fields")
+    who.add_argument("--uan")
+    _add_credential_flags(who)
+    _add_output_flags(who)
+    who.set_defaults(func=cmd_profile)
 
     pdf = sub.add_parser("pdf", help="ask the portal to generate the passbook PDF")
     pdf.add_argument("--uan")

@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from html import unescape
 
 
 class _TableExtractor(HTMLParser):
@@ -446,3 +447,177 @@ def _yearly_row(cells: list[str], header: list[str]) -> YearlyRow:
         pension_share=pick_amount("pension"),
         raw=cells,
     )
+
+
+# -- the profile and service-history pages ----------------------------------
+#
+# Both are static server-rendered pages: the values are in the markup, so they
+# need an HTML parse rather than another endpoint. They share one shape -
+#
+#     <p class="...bold...">LABEL</p>          <- the label cell
+#     <p class="text-muted mb-0">VALUE</p>     <- the adjacent value cell
+#
+# -- so one regex pair serves both, given the right labels.
+
+# A label/value pair. The value may wrap a <span> (badges, calendar icons), so
+# the capture is de-tagged before use.
+# Between the label's </p> and the value's <p> the portal may put any run of
+# column divs, a rule or a break - and the run differs between a card field and a
+# timeline field, so the whole run is skipped rather than one arrangement required.
+_BETWEEN = r"(?:</?div[^>]*>\s*|<hr[^>]*>\s*|<br[^>]*>\s*)*"
+
+# Label and value are told apart by their classes, which is the only thing that
+# separates them reliably: the timeline's *employer* line is a bold <p> just like
+# a label, so matching on "bold" paired the employer with the "Est Id" value and
+# then swallowed the real Est Id field. A label is `mb-0` and neither of the value
+# classes; a value carries `text-muted` or `text-md-start`.
+_LABEL_VALUE_RE = re.compile(
+    r'<p[^>]*class="(?![^"]*text-muted)(?![^"]*text-md-start)[^"]*mb-0[^"]*"[^>]*>'
+    r'\s*([A-Za-z][A-Za-z /()\.\-]{1,40}?)\s*</p>\s*' + _BETWEEN +
+    r'<p[^>]*class="[^"]*(?:text-muted|text-md-start)[^"]*"[^>]*>\s*(.*?)</p>',
+    re.S)
+
+
+def _clean(text: str) -> str:
+    """Strip tags/entities and collapse whitespace from a captured value."""
+    text = re.sub(r"<[^>]+>", " ", text)
+    return _squash(unescape(text).replace("\xa0", " "))
+
+
+def label_values(html: str) -> dict[str, str]:
+    """Every ``LABEL</p> ... VALUE</p>`` pair on a page, in document order.
+
+    Later duplicates win, which is what matters for a page that repeats a
+    heading before its value.
+    """
+    pairs: dict[str, str] = {}
+    for label, value in _LABEL_VALUE_RE.findall(html):
+        label = _squash(unescape(label))
+        if label and label not in pairs:
+            pairs[label] = _clean(value)
+    return pairs
+
+
+@dataclass
+class ServiceRecord:
+    """One establishment's stint, from the service-history timeline."""
+
+    employer: str = ""
+    establishment_id: str = ""
+    member_id: str = ""
+    ncp_days: str = ""
+    joining_date: str = ""
+    exit_date: str = ""
+    total_service: str = ""
+
+
+@dataclass
+class ServiceHistory:
+    """UAN-level service summary plus each establishment's stint."""
+
+    total_experience: str = ""
+    date_of_joining: str = ""
+    total_ncp_days: str = ""
+    records: list[ServiceRecord] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "total_experience": self.total_experience,
+            "date_of_joining": self.date_of_joining,
+            "total_ncp_days": self.total_ncp_days,
+            "establishments": [
+                {"employer": r.employer, "establishment_id": r.establishment_id,
+                 "member_id": r.member_id, "ncp_days": r.ncp_days,
+                 "joining_date": r.joining_date, "exit_date": r.exit_date,
+                 "total_service": r.total_service}
+                for r in self.records],
+        }
+
+
+# One timeline entry: the number badge, the period, the employer, then the
+# label/value grid inside it.
+_TIMELINE_ITEM_RE = re.compile(
+    r'<li class="timeline-item[^"]*">(.*?)</li>', re.S)
+_TIMELINE_EMPLOYER_RE = re.compile(
+    r'class="[^"]*bold[^"]*"[^>]*>\s*([^<]{3,80}?)\s*</p>')
+_TIMELINE_PERIOD_RE = re.compile(r'class="tlp[^"]*"[^>]*>\s*([^<]+?)\s*</p>')
+
+
+def parse_service_history(html: str) -> ServiceHistory:
+    """Parse the service-history page.
+
+    The per-establishment fields repeat the same labels in every timeline entry
+    (``Est Id``, ``Member Id``, ``Joining Date`` ...), so the page is split into
+    its timeline items first and each item parsed on its own - a page-wide
+    label/value sweep would collapse four employers into one set of values.
+    """
+    result = ServiceHistory()
+    overview = html.split('class="timeline"')[0]
+    summary = label_values(overview)
+    result.total_experience = summary.get("Total Experience", "")
+    result.date_of_joining = summary.get("Date of Joining", "")
+    result.total_ncp_days = summary.get("Total NCP Days", "")
+
+    for item in _TIMELINE_ITEM_RE.findall(html):
+        employer = _TIMELINE_EMPLOYER_RE.search(item)
+        period = _TIMELINE_PERIOD_RE.search(item)
+        fields = label_values(item)
+        record = ServiceRecord(
+            employer=_clean(employer.group(1)) if employer else "",
+            establishment_id=fields.get("Est Id", ""),
+            member_id=fields.get("Member Id", ""),
+            ncp_days=fields.get("NCP Days", ""),
+            joining_date=_date_only(fields.get("Joining Date", "")),
+            exit_date=_date_only(fields.get("Exit Date", "")) or _period_end(period),
+            total_service=fields.get("Total Service", ""),
+        )
+        if record.employer or record.member_id:
+            result.records.append(record)
+
+    if not result.records:
+        result.notes.append(
+            "no service-history timeline entries were found; the page layout "
+            "may have changed")
+    return result
+
+
+_DATE_RE = re.compile(r"\d{2}-[A-Za-z]{3}-\d{4}")
+
+
+def _date_only(text: str) -> str:
+    """Drop the calendar icon and spacing the portal trails after a date."""
+    match = _DATE_RE.search(text)
+    return match.group(0) if match else text.strip()
+
+
+def _period_end(period: re.Match | None) -> str:
+    """The right-hand side of 'May 2026 - Present' when Exit Date is absent."""
+    if not period:
+        return ""
+    _, _, end = period.group(1).partition(" - ")
+    return end.strip() if end.strip().lower() != "present" else "Present"
+
+
+# Labels that are navigation chrome rather than data. The profile page renders
+# the nav inside the same label/value shape as the fields, so a naive sweep
+# reports "Passbook" as if it were a profile field.
+_PROFILE_CHROME = {
+    "epfo", "home", "profile", "passbook", "claims", "service history",
+    "calculators", "epf calculator", "edli calculator", "pension calculator",
+    "logout", "visitor count", "uan",
+}
+
+
+def parse_profile(html: str) -> dict[str, str]:
+    """The profile page's data fields, without the navigation labels.
+
+    Scoped to the region that starts at the first details card: everything above
+    it is the site nav and the member's name banner, both of which use the same
+    markup as a real field.
+    """
+    start = html.find("Basic Details")
+    end = html.find("Visitor Count")
+    body = html[start:end] if start >= 0 else html[:end if end >= 0 else len(html)]
+    return {label: value for label, value in label_values(body).items()
+            if label.lower() not in _PROFILE_CHROME}

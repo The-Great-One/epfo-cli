@@ -69,10 +69,48 @@ epfo-cli ledger                       # the whole passbook: every member, every 
 epfo-cli ledger --out ledger.csv      # ...as CSV (.json also supported)
 epfo-cli ledger --year 2025           # a specific financial year
 epfo-cli ledger --member 070329       # one member account (id or trailing digits)
+epfo-cli service-history              # employment history per establishment
+epfo-cli service-history --json       # ...as JSON (--out to write a file)
+epfo-cli profile                      # profile + KYC fields
 epfo-cli pdf                          # ask the portal for the passbook PDF
 epfo-cli export --out pf.json         # write balances to a file
 epfo-cli discover --out endpoints.json
 ```
+
+### The other pages (`service-history`, `profile`)
+
+Both are static server-rendered pages — every value is in the markup, so they
+need an HTML parse, not another endpoint. They are reached the same way as the
+passbook page, but note **each nav token is single-use**: navigating consumes the
+tokens the page you were holding.
+
+```text
+home2?token=<login token>            read the nav menu HERE
+  └─ GET /service-history?token=<that page's token>   → employment history
+  └─ GET /profile?token=<that page's token>           → profile + KYC
+```
+
+Harvesting every token from the home page up front and then fetching them all
+returns `invalid-token` for every page after the first. Ask for one page, then
+re-read the nav from the page you got back.
+
+`service-history` prints the UAN-level totals plus one row per establishment:
+
+```text
+  employer                                  joining      exit         service                 ncp
+  ACME TECHNOLOGIES PRIVATE LIMITED                01-May-2026  Present      0 Years 5 Months 5 Days 0 Days
+  GLOBEX SERVICES PRIVATE LIMITED                21-Apr-2026  30-Apr-2026  0 Years 0 Months 9 Days 0 Days
+  INITECH SOLUTIONS PRIVATE LIMITED 09-Dec-2024  17-Apr-2026  1 Years 4 Months 8 Days 0 Days
+  PINNACLE FINANCE LIMITED                     04-Jul-2022  02-Dec-2024  2 Years 4 Months 28 Days 0 Days
+```
+
+Each timeline entry repeats the same labels (`Est Id`, `Member Id`, `Joining
+Date`), so the page is split into its timeline items before parsing — a
+page-wide label sweep would collapse every employer into one set of values.
+
+`profile` prints the personal and KYC fields. The nav entries use the same
+label/value markup as the data fields, so the parse is scoped to the details
+region and the chrome labels are excluded by name.
 
 ### The full ledger (`ledger`, `pdf`)
 
