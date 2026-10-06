@@ -18,6 +18,11 @@ for any client that wants to work at all:
 from __future__ import annotations
 
 import base64
+import email.message
+import http.client
+import os as _os
+import threading
+import io
 import json
 import re
 import ssl
@@ -25,11 +30,10 @@ from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.error import HTTPError
 from urllib.request import (
-    HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request,
-    build_opener,
+    HTTPRedirectHandler, HTTPSHandler, Request, build_opener,
 )
 
 from .crypto import encode_password
@@ -94,6 +98,235 @@ def plain_opener():
     depend on the caller's interpreter having a usable CA bundle.
     """
     return build_opener(HTTPSHandler(context=ssl_context()))
+
+
+class _ConnOpener:
+    """A transport that pre-warms a pool of TCP connections, in parallel.
+
+    The passbook host charges a large, fixed **per-TCP-connection** penalty -
+    measured at 45-75 s to establish a socket in Oct 2026 - while any request on
+    an already-open socket answers in ~0.04 s. Worse, the server honours
+    keep-alive for its AJAX endpoints but sends ``Connection: close`` on the
+    login and ``passbook`` page GETs, so a single command needs *several* fresh
+    connections and pays the stall on each.
+
+    Two things make it fast without changing what is sent:
+
+    * **Warm in parallel.** ``connect()`` stalls are independent, so opening N
+      sockets concurrently costs one stall of wall-clock time, not N. The pool
+      is filled up front, before the first real request.
+    * **One request per connection.** Because a connection dies after the
+      request the server closes on, each pooled socket is used for exactly one
+      request and then discarded; the pool is refilled lazily (again in
+      parallel) when it runs dry.
+
+    ``open()`` is the only method the callers use, and it returns an object with
+    ``.read()`` / ``.headers`` / ``.geturl()`` / ``.status`` that also works as a
+    context manager - the parts of ``HTTPResponse`` actually relied upon.
+    """
+
+    POOL_SIZE = int(_os.environ.get("EPFO_POOL_SIZE", "30"))
+
+    def __init__(self, jar: CookieJar, context: ssl.SSLContext):
+        self._jar = jar
+        self._ctx = context
+        self._pool: list[http.client.HTTPSConnection] = []
+        self._host, self._port = _host_port(BASE)
+
+    # -- pool management ---------------------------------------------------
+
+    def _new_conn(self) -> http.client.HTTPSConnection:
+        return http.client.HTTPSConnection(self._host, self._port, timeout=300,
+                                           context=self._ctx)
+
+    def _warm(self) -> http.client.HTTPSConnection | None:
+        """Fill the pool with ``POOL_SIZE`` sockets, connecting concurrently."""
+        made: list[http.client.HTTPSConnection] = [None] * self.POOL_SIZE  # type: ignore
+
+        def worker(i: int) -> None:
+            conn = self._new_conn()
+            try:
+                conn.connect()
+                made[i] = conn
+            except Exception:
+                pass
+
+        threads = [threading.Thread(target=worker, args=(i,))
+                   for i in range(self.POOL_SIZE)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(360)
+        self._pool = [c for c in made if c is not None]
+
+    def _take(self) -> http.client.HTTPSConnection | None:
+        if not self._pool:
+            self._warm()
+        return self._pool.pop() if self._pool else None
+
+    def close(self) -> None:
+        for conn in self._pool:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._pool = []
+
+    # -- request path ------------------------------------------------------
+
+    def _once(self, url: str, method: str, headers: dict,
+              body: bytes | None) -> tuple[int, Any, bytes]:
+        conn = self._take()
+        if conn is None:
+            raise HTTPError(url, 0, "could not establish any connection to %s"
+                            % self._host, None, None)
+        path = _path_of(url)
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+        except (http.client.HTTPException, OSError) as exc:
+            # This socket is spent (a pool entry can be killed by the server
+            # between warm-up and use). Take another and try the request once
+            # on a genuinely fresh connection.
+            try:
+                conn.close()
+            except Exception:
+                pass
+            replacement = self._take()
+            if replacement is None:
+                raise HTTPError(url, 0, "connection dropped: %s" % exc,
+                                None, None) from exc
+            try:
+                replacement.request(method, path, body=body, headers=headers)
+                resp = replacement.getresponse()
+                raw = replacement.read()
+            except (http.client.HTTPException, OSError) as exc2:
+                raise HTTPError(url, 0, "connection dropped: %s" % exc2,
+                                None, None) from exc2
+            finally:
+                try:
+                    replacement.close()
+                except Exception:
+                    pass
+            return resp.status, resp.headers, raw
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return resp.status, resp.headers, raw
+
+    def open(self, request: Request, timeout: float | None = None):
+        url = request.full_url
+        method = request.get_method()
+        headers = {"User-Agent": USER_AGENT, "Connection": "keep-alive"}
+        for key, value in request.header_items():
+            headers[key] = value
+        body = request.data
+        cookie_header = self._cookie_header(url)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        status, resp_headers, raw = self._once(url, method, headers, body)
+        self._absorb_cookies(url, resp_headers)
+        return _PooledResponse(url, status, resp_headers, raw)
+
+    # -- cookie plumbing ---------------------------------------------------
+
+    def _cookie_header(self, url: str) -> str:
+        parts = urlsplit(url)
+        return "; ".join(
+            "%s=%s" % (c.name, c.value)
+            for c in self._jar
+            if _cookie_matches(c, parts.hostname or "", parts.path or "/")
+        )
+
+    def _absorb_cookies(self, url: str, headers) -> None:
+        raw = headers.get_all("Set-Cookie") or []
+        if not raw:
+            return
+        parts = urlsplit(url)
+        msg = email.message.Message()
+        for chunk in raw:
+            msg["Set-Cookie"] = chunk
+        self._jar.extract_cookies(_HeadersResponse(msg, url), _FakeRequest(parts))
+
+
+class _HeadersResponse:
+    """The ``response`` half of ``CookieJar.extract_cookies``.
+
+    ``extract_cookies`` reads ``.info()`` for the Set-Cookie headers and
+    ``.geturl()`` for the default cookie path.
+    """
+
+    def __init__(self, headers: email.message.Message, url: str):
+        self._headers = headers
+        self._url = url
+
+    def info(self) -> email.message.Message:
+        return self._headers
+
+    def geturl(self) -> str:
+        return self._url
+
+
+class _FakeRequest:
+    """The ``request`` half of ``CookieJar.extract_cookies``."""
+
+    def __init__(self, parts):
+        self.host = parts.netloc
+        self.type = parts.scheme
+        self.unverifiable = False
+        self._parts = parts
+
+    def get_full_url(self) -> str:
+        return "%s://%s%s" % (self._parts.scheme, self._parts.netloc,
+                              self._parts.path)
+
+    def has_header(self, name: str) -> bool:
+        return False
+
+
+class _PooledResponse(io.BytesIO):
+    """The minimal response surface the callers use, wrapping pooled bytes."""
+
+    def __init__(self, url: str, status: int, headers, body: bytes):
+        super().__init__(body)
+        self._url = url
+        self.status = status
+        self.code = status
+        self.headers = headers
+        self.reason = getattr(headers, "reason", "")
+
+    def geturl(self) -> str:
+        return self._url
+
+    def getcode(self) -> int:
+        return self.status
+
+    def info(self):
+        return self.headers
+
+
+def _host_port(url: str) -> tuple[str, int]:
+    """Split a URL into (host, port), defaulting the port by scheme."""
+    parts = urlsplit(url)
+    return parts.hostname or "", parts.port or (
+        443 if parts.scheme == "https" else 80)
+
+
+def _path_of(url: str) -> str:
+    """The request path (with query) for an absolute URL."""
+    parts = urlsplit(url)
+    return parts.path + (("?" + parts.query) if parts.query else "")
+
+
+def _cookie_matches(cookie, host: str, path: str) -> bool:
+    """Standard RFC 6265 domain/path matching, enough for this host."""
+    domain = (cookie.domain or "").lstrip(".")
+    if domain and not (host == domain or host.endswith("." + domain)):
+        return False
+    return path.startswith(cookie.path or "/")
 
 
 class EPFOError(RuntimeError):
@@ -161,10 +394,7 @@ class EPFOSession:
     def __init__(self, cookies_path: Path | None = None) -> None:
         self.cookies_path = Path(cookies_path) if cookies_path else None
         self._jar = CookieJar()
-        self._opener = build_opener(HTTPCookieProcessor(self._jar),
-                                    NoRedirect(),
-                                    HTTPSHandler(context=ssl_context()))
-        self._opener.addheaders = [("User-Agent", USER_AGENT)]
+        self._opener = _ConnOpener(self._jar, ssl_context())
         self.login_token: str | None = None
         self.session_token: str | None = None
 
@@ -199,6 +429,9 @@ class EPFOSession:
         request = Request(url, data=body, headers=headers,
                           method=method or ("POST" if data is not None else "GET"))
         with self._opener.open(request, timeout=60) as response:
+            if getattr(response, "status", 200) in (301, 302, 303, 307, 308):
+                location = response.headers.get("Location", "")
+                raise self._session_error(path, location)
             return response.read().decode("utf-8", errors="replace")
 
     # -- login ------------------------------------------------------------
@@ -274,6 +507,9 @@ class EPFOSession:
         request = Request(url)
         try:
             with self._opener.open(request, timeout=60) as response:
+                if getattr(response, "status", 200) in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location", "")
+                    raise self._session_error(path, location)
                 html = response.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             if exc.code in (301, 302, 303, 307, 308):
@@ -355,8 +591,6 @@ class EPFOSession:
         target = Path(path or self.cookies_path or "epfo-cookies.txt")
         jar = MozillaCookieJar(str(target))
         jar.load(ignore_discard=True, ignore_expires=True)
-        self._opener = build_opener(HTTPCookieProcessor(jar),
-                                    NoRedirect(),
-                                    HTTPSHandler(context=ssl_context()))
-        self._opener.addheaders = [("User-Agent", USER_AGENT)]
+        self._opener.close()
         self._jar = jar
+        self._opener = _ConnOpener(jar, ssl_context())
