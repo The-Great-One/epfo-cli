@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: 💬 Discussions
+    url: https://github.com/The-Great-One/epfo-cli/discussions
+    about: For general questions and community chat, use Discussions instead of opening an issue.
+  - name: 📖 Documentation
+    url: https://github.com/The-Great-One/epfo-cli#readme
+    about: Check the README before opening an issue — your answer may already be there.

@@ -1,0 +1,10 @@
+# CODEOWNERS
+*                   @The-Great-One
+/README.md          @The-Great-One
+/CONTRIBUTING.md    @The-Great-One
+/CODE_OF_CONDUCT.md @The-Great-One
+/SECURITY.md        @The-Great-One
+/LICENSE            @The-Great-One
+/.github/           @The-Great-One
+/epfo/              @The-Great-One
+/tests/             @The-Great-One

@@ -1,3 +1,4 @@
+# ─── Python ──────────────────────────────────────────────────────────────────
 .venv/
 __pycache__/
 *.py[cod]
@@ -5,13 +6,75 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# ─── Dependencies (template baseline) ────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ─── Build output (template baseline) ────────────────────────────────────────
+out/
+.next/
+.nuxt/
+.svelte-kit/
+.output/
+
+# ─── Environment variables ───────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Testing & coverage ───────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+*.lcov
+
+# ─── Cache ────────────────────────────────────────────────────────────────────
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# ─── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# ─── IDE / Editor ─────────────────────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+*.pem
+*.key
+*.cert
+.vercel
+.netlify
+
+# ─── Project-specific ─────────────────────────────────────────────────────────
 .hermes.md
 epfo-cookies.txt
 captcha.jpg
 captcha-big.png
 otp-panel.html
-*.log
-
-# user data
 data/
 *.sqlite
