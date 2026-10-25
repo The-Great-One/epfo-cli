@@ -11,3 +11,7 @@ captcha.jpg
 captcha-big.png
 otp-panel.html
 *.log
+
+# user data
+data/
+*.sqlite
