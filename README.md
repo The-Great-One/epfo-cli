@@ -2,7 +2,9 @@
 
 Read-only CLI for the EPFO member passbook portal (`passbook.epfindia.gov.in`).
 
-![icon](icon.png)
+<p align="center">
+  <img src="icon.png" alt="epfo-cli icon" width="96" />
+</p>
 
 ## What it does
 
